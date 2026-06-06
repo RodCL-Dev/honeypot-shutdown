@@ -64,73 +64,88 @@ public class Honeypot {
 
     static void trataConexao(Socket cliente, int porta) {
         String ip      = cliente.getInetAddress().getHostAddress();
-        String horario = LocalDateTime.now()
-            .format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"));
+        String horario = LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss"));
         String servico = nomeServico(porta);
 
         try (
-            BufferedReader entrada = new BufferedReader(
-                new InputStreamReader(cliente.getInputStream()));
+            BufferedReader entrada = new BufferedReader(new InputStreamReader(cliente.getInputStream()));
             PrintWriter saida = new PrintWriter(cliente.getOutputStream(), true)
         ) {
-            saida.println(bannerFalso(porta));
+            // Define um timeout de 3 segundos para não travar a thread esperando eternamente
+            cliente.setSoTimeout(3000);
 
-            StringBuilder dados = new StringBuilder();
-            long timeout = System.currentTimeMillis() + 2000;
-            while (System.currentTimeMillis() < timeout) {
-                if (entrada.ready()) {
-                    String linha = entrada.readLine();
-                    if (linha == null) break;
-                    dados.append(linha).append("\n");
+            StringBuilder requisicaoCompleta = new StringBuilder();
+            String linha;
+            int contentLength = 0;
+
+            // 1. Lê os cabeçalhos da requisição HTTP
+            try {
+                while ((linha = entrada.readLine()) != null && !linha.isEmpty()) {
+                    requisicaoCompleta.append(linha).append("\n");
+                    if (linha.toLowerCase().startsWith("content-length:")) {
+                        contentLength = Integer.parseInt(linha.substring(15).trim());
+                    }
+                }
+            } catch (IOException e) {
+                // Timeout ou o cliente desconectou antes de mandar os dados
+            }
+
+            // 2. Se for um POST (envio de formulário), lê o corpo do texto
+            StringBuilder corpoPost = new StringBuilder();
+            if (contentLength > 0) {
+                for (int i = 0; i < contentLength; i++) {
+                    corpoPost.append((char) entrada.read());
                 }
             }
 
-            String[] cred = extraiCredenciais(dados.toString());
-            String usuario = cred[0], senha = cred[1];
+            String dadosFinais = requisicaoCompleta.toString() + "\n" + corpoPost.toString();
 
-            // Geolocalização do IP (gratuita, sem API key)
+            // Envia a tela de login falsa ou banner correspondente
+            saida.print(bannerFalso(porta));
+            saida.flush();
+
+            // Extrai credenciais
+            String usuario = "", senha = "";
+            String corpoStr = corpoPost.toString();
+            
+            if (corpoStr.contains("username=") && corpoStr.contains("password=")) {
+                for (String param : corpoStr.split("&")) {
+                    if (param.startsWith("username=")) usuario = URLDecoder.decode(param.split("=")[1], "UTF-8");
+                    if (param.startsWith("password=")) senha = URLDecoder.decode(param.split("=")[1], "UTF-8");
+                }
+            } else {
+                String[] cred = extraiCredenciais(dadosFinais);
+                usuario = cred[0]; senha = cred[1];
+            }
+
+            // Geolocalização
             String[] geo = geolocalizaIP(ip);
-            String pais   = geo[0];
-            String cidade = geo[1];
-            String org    = geo[2];
+            String pais = geo[0], cidade = geo[1], org = geo[2];
 
-            // Exibe no terminal
-            System.out.println(NEG + VERM + "\n⚠  CONEXÃO DETECTADA!" + RESET);
-            System.out.println(AMAR + "Serviço : " + RESET + servico + " (" + porta + ")");
-            System.out.println(AMAR + "IP      : " + RESET + ip);
-            System.out.println(AMAR + "Local   : " + RESET + cidade + " / " + pais);
-            System.out.println(AMAR + "Org     : " + RESET + org);
-            System.out.println(AMAR + "Horário : " + RESET + horario);
-            if (!usuario.isEmpty())
-                System.out.println(NEG + VERM + "🔑 LOGIN → " + usuario +
-                    " / " + senha + RESET);
-            System.out.println(AMAR + "Dados   : " + RESET +
-                (dados.length() > 0 ? dados.toString().trim() : "(nenhum)"));
-            System.out.println(CIANO + "────────────────────────────────────" + RESET);
+            // Exibe e salva o log
+            if (!corpoStr.isEmpty() || !usuario.isEmpty() || porta != 8080) {
+                System.out.println(NEG + VERM + "\n⚠  CONEXÃO DETECTADA!" + RESET);
+                System.out.println(AMAR + "Serviço : " + RESET + servico + " (" + porta + ")");
+                System.out.println(AMAR + "IP      : " + RESET + ip);
+                System.out.println(AMAR + "Local   : " + RESET + cidade + " / " + pais);
+                System.out.println(AMAR + "Horário : " + RESET + horario);
+                
+                if (!usuario.isEmpty()) {
+                    System.out.println(NEG + VERM + "🔑 LOGIN CAPTURADO → " + usuario + " / " + senha + RESET);
+                }
 
-            // Salva txt
-            salvaLogTXT(ip, horario, servico, porta, usuario, senha,
-                pais, cidade, org, dados.toString());
+                salvaLogTXT(ip, horario, servico, porta, usuario, senha, pais, cidade, org, dadosFinais);
+                conexoes.add(new String[]{horario, ip, pais, cidade, org, servico, String.valueOf(porta), usuario, senha, corpoStr.isEmpty() ? "(acesso visual)" : corpoStr});
+                geraRelatorioHTML();
+            }
 
-            // Adiciona à lista HTML
-            conexoes.add(new String[]{
-                horario, ip, pais, cidade, org,
-                servico, String.valueOf(porta),
-                usuario, senha,
-                dados.toString().trim().isEmpty() ? "(nenhum)" : dados.toString().trim()
-            });
-
-            geraRelatorioHTML();
-
-        } catch (IOException e) {
-            System.out.println(VERM + "[!] Erro com " + ip +
-                ": " + e.getMessage() + RESET);
+        } catch (Exception e) {
+            // Erros tratados silenciosamente para não poluir o terminal
         }
     }
 
     // ========== GEOLOCALIZAÇÃO GRATUITA ==========
     static String[] geolocalizaIP(String ip) {
-        // IPs locais não têm geo
         if (ip.startsWith("127.") || ip.startsWith("192.168") ||
             ip.startsWith("10.") || ip.equals("0:0:0:0:0:0:0:1")) {
             return new String[]{"Local", "Localhost", "Rede local"};
@@ -138,11 +153,9 @@ public class Honeypot {
         try {
             HttpClient client = HttpClient.newHttpClient();
             HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("http://ip-api.com/json/" + ip +
-                    "?fields=country,city,org"))
+                .uri(URI.create("http://ip-api.com/json/" + ip + "?fields=country,city,org"))
                 .build();
-            HttpResponse<String> resp =
-                client.send(req, HttpResponse.BodyHandlers.ofString());
+            HttpResponse<String> resp = client.send(req, HttpResponse.BodyHandlers.ofString());
             String body = resp.body();
 
             String pais   = extraiJson(body, "country");
@@ -178,8 +191,7 @@ public class Honeypot {
                 <meta charset="UTF-8">
                 <title>Honeypot Shutdown - Relatório</title>
                 <style>
-                  body { background:#0d0d0d; color:#e0e0e0;
-                         font-family:monospace; padding:20px; }
+                  body { background:#0d0d0d; color:#e0e0e0; font-family:monospace; padding:20px; }
                   h1   { color:#00ffcc; border-bottom:1px solid #333; }
                   table { width:100%; border-collapse:collapse; margin-top:20px; }
                   th   { background:#1a1a2e; color:#00ffcc; padding:10px; }
@@ -197,12 +209,8 @@ public class Honeypot {
                 <h1>🛡 Honeypot Shutdown — Relatório de Ataques</h1>
                 """);
 
-            pw.println("<p class='total'>Total de conexões: <b>" +
-                conexoes.size() + "</b></p>");
-            pw.println("<p>Atualizado: " + LocalDateTime.now()
-                .format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss")) +
-                "</p>");
-
+            pw.println("<p class='total'>Total de conexões: <b>" + conexoes.size() + "</b></p>");
+            pw.println("<p>Atualizado: " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss")) + "</p>");
             pw.println("""
                 <table>
                 <tr>
@@ -219,8 +227,7 @@ public class Honeypot {
                         case "mysql" -> "mysql";
                         default      -> "http";
                     };
-                    String login = c[7].isEmpty() ? "-" :
-                        "<span class='cred'>" + c[7] + " / " + c[8] + "</span>";
+                    String login = c[7].isEmpty() ? "-" : "<span class='cred'>" + c[7] + " / " + c[8] + "</span>";
 
                     pw.println("<tr>" +
                         "<td>" + c[0] + "</td>" +
@@ -236,12 +243,9 @@ public class Honeypot {
             }
 
             pw.println("</table></body></html>");
-            System.out.println(VERDE + "[+] Relatório atualizado: " +
-                LOG_HTML + RESET);
 
         } catch (IOException e) {
-            System.out.println(VERM + "[!] Erro no HTML: " +
-                e.getMessage() + RESET);
+            System.out.println(VERM + "[!] Erro no HTML: " + e.getMessage() + RESET);
         }
     }
 
@@ -249,8 +253,7 @@ public class Honeypot {
     static void salvaLogTXT(String ip, String horario, String servico,
             int porta, String usuario, String senha,
             String pais, String cidade, String org, String dados) {
-        try (BufferedWriter bw = new BufferedWriter(
-                new FileWriter(LOG_TXT, true))) {
+        try (BufferedWriter bw = new BufferedWriter(new FileWriter(LOG_TXT, true))) {
             bw.write("=== CONEXÃO ==="); bw.newLine();
             bw.write("Horário : " + horario); bw.newLine();
             bw.write("Serviço : " + servico + " (" + porta + ")"); bw.newLine();
@@ -277,8 +280,7 @@ public class Honeypot {
                 senha = linha.replaceAll("(?i)(pass |password:)", "").trim();
             if (l.startsWith("authorization: basic ")) {
                 try {
-                    String decoded = new String(Base64.getDecoder()
-                        .decode(linha.split(" ")[2]));
+                    String decoded = new String(Base64.getDecoder().decode(linha.split(" ")[2]));
                     String[] p = decoded.split(":", 2);
                     if (p.length == 2) { usuario = p[0]; senha = p[1]; }
                 } catch (Exception ignored) {}
@@ -288,6 +290,50 @@ public class Honeypot {
     }
 
     static String bannerFalso(int porta) {
+        if (porta == 8080) {
+            String html = """
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <title>Router Admin Login</title>
+                    <style>
+                        body { background: #1a1a1a; color: #fff; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                        .login-box { background: #2a2a2a; padding: 30px; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); width: 320px; }
+                        h2 { margin-top: 0; color: #007bff; text-align: center; }
+                        .input-group { margin-bottom: 15px; }
+                        label { display: block; margin-bottom: 5px; font-size: 14px; color: #aaa; }
+                        input[type="text"], input[type="password"] { width: 100%; padding: 10px; border: 1px solid #444; background: #333; color: #fff; border-radius: 4px; box-sizing: border-box; }
+                        button { width: 100%; padding: 10px; background: #007bff; border: none; color: #fff; font-size: 16px; border-radius: 4px; cursor: pointer; margin-top: 10px; }
+                        button:hover { background: #0056b3; }
+                    </style>
+                </head>
+                <body>
+                    <div class="login-box">
+                        <h2>Painel Administrativo</h2>
+                        <form action="/" method="POST">
+                            <div class="input-group">
+                                <label>Login</label>
+                                <input type="text" name="username" required>
+                            </div>
+                            <div class="input-group">
+                                <label>Senha</label>
+                                <input type="password" name="password" required>
+                            </div>
+                            <button type="submit">Login</button>
+                        </form>
+                    </div>
+                </body>
+                </html>
+                """;
+
+            return "HTTP/1.1 200 OK\r\n" +
+                   "Content-Type: text/html; charset=UTF-8\r\n" +
+                   "Content-Length: " + html.getBytes().length + "\r\n" +
+                   "Connection: close\r\n\r\n" + 
+                   html;
+        }
+
         return switch (porta) {
             case 2222 -> "SSH-2.0-OpenSSH_8.9p1 Ubuntu";
             case 2121 -> "220 ProFTPD 1.3.5 Server ready.";
