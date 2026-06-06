@@ -26,7 +26,7 @@ public class Honeypot {
     public static void main(String[] args) {
         System.out.println(NEG + CIANO +
             "╔══════════════════════════════════════╗\n" +
-            "║     HONEYPOT SHUTDOWN - ATIVO        ║\n" +
+            "║     SHADOW API HONEYPOT - ATIVO     ║\n" +
             "╚══════════════════════════════════════╝" + RESET);
 
         for (int porta : PORTAS) {
@@ -77,20 +77,34 @@ public class Honeypot {
             StringBuilder requisicaoCompleta = new StringBuilder();
             String linha;
             int contentLength = 0;
+            String rotaDetectada = "/";
+            String metodoHTTP = "UNKNOWN";
 
             // 1. Lê os cabeçalhos da requisição HTTP
             try {
+                boolean primeiraLinha = true;
                 while ((linha = entrada.readLine()) != null && !linha.isEmpty()) {
                     requisicaoCompleta.append(linha).append("\n");
+                    
+                    // Extrai o método e a rota (Ex: POST /api/v1/auth/login HTTP/1.1)
+                    if (primeiraLinha) {
+                        String[] partes = linha.split(" ");
+                        if (partes.length >= 2) {
+                            metodoHTTP = partes[0];
+                            rotaDetectada = partes[1];
+                        }
+                        primeiraLinha = false;
+                    }
+                    
                     if (linha.toLowerCase().startsWith("content-length:")) {
                         contentLength = Integer.parseInt(linha.substring(15).trim());
                     }
                 }
             } catch (IOException e) {
-                // Timeout ou o cliente desconectou antes de mandar os dados
+                // Timeout ou o cliente desconectou antes de mandar todos os dados
             }
 
-            // 2. Se for um POST (envio de formulário), lê o corpo do texto
+            // 2. Se houver corpo (Payload enviado pelo bot), faz a leitura correspondente
             StringBuilder corpoPost = new StringBuilder();
             if (contentLength > 0) {
                 for (int i = 0; i < contentLength; i++) {
@@ -100,15 +114,22 @@ public class Honeypot {
 
             String dadosFinais = requisicaoCompleta.toString() + "\n" + corpoPost.toString();
 
-            // Envia a tela de login falsa ou banner correspondente
-            saida.print(bannerFalso(porta));
+            // Envia a tela de login falsa, resposta JSON ou banner correspondente
+            saida.print(bannerFalso(porta, rotaDetectada));
             saida.flush();
 
-            // Extrai credenciais
+            // Extração inteligente de credenciais ou payloads
             String usuario = "", senha = "";
             String corpoStr = corpoPost.toString();
             
-            if (corpoStr.contains("username=") && corpoStr.contains("password=")) {
+            if (rotaDetectada.startsWith("/api/v1/")) {
+                servico = "API (" + metodoHTTP + ")";
+                // Se o atacante mandou um JSON na API, capturamos o payload inteiro
+                if (corpoStr.contains("\"username\"") || corpoStr.contains("\"user\"") || corpoStr.contains("{")) {
+                    usuario = "[JSON Payload]";
+                    senha = corpoStr.trim();
+                }
+            } else if (corpoStr.contains("username=") && corpoStr.contains("password=")) {
                 for (String param : corpoStr.split("&")) {
                     if (param.startsWith("username=")) usuario = URLDecoder.decode(param.split("=")[1], "UTF-8");
                     if (param.startsWith("password=")) senha = URLDecoder.decode(param.split("=")[1], "UTF-8");
@@ -122,25 +143,29 @@ public class Honeypot {
             String[] geo = geolocalizaIP(ip);
             String pais = geo[0], cidade = geo[1], org = geo[2];
 
-            // Exibe e salva o log
-            if (!corpoStr.isEmpty() || !usuario.isEmpty() || porta != 8080) {
-                System.out.println(NEG + VERM + "\n⚠  CONEXÃO DETECTADA!" + RESET);
-                System.out.println(AMAR + "Serviço : " + RESET + servico + " (" + porta + ")");
-                System.out.println(AMAR + "IP      : " + RESET + ip);
-                System.out.println(AMAR + "Local   : " + RESET + cidade + " / " + pais);
-                System.out.println(AMAR + "Horário : " + RESET + horario);
+            // Exibe e salva o log (ignora acessos vazios na raiz da porta 8080 para evitar spam de scanners simples)
+            if (!corpoStr.isEmpty() || !usuario.isEmpty() || porta != 8080 || !rotaDetectada.equals("/")) {
+                System.out.println(NEG + VERM + "\n⚠  ATTACK TRAPPED IN API/PORT!" + RESET);
+                System.out.println(AMAR + "Alvo/Serviço: " + RESET + servico + " -> " + rotaDetectada);
+                System.out.println(AMAR + "IP Atacante : " + RESET + ip);
+                System.out.println(AMAR + "Localização : " + RESET + cidade + " / " + pais);
+                System.out.println(AMAR + "Provedor    : " + RESET + org);
+                System.out.println(AMAR + "Horário     : " + RESET + horario);
                 
-                if (!usuario.isEmpty()) {
-                    System.out.println(NEG + VERM + "🔑 LOGIN CAPTURADO → " + usuario + " / " + senha + RESET);
+                if (!usuario.isEmpty() && !usuario.equals("[JSON Payload]")) {
+                    System.out.println(NEG + VERM + "🔑 CREDENCIAIS -> " + usuario + " / " + senha + RESET);
+                } else if (usuario.equals("[JSON Payload]")) {
+                    System.out.println(NEG + VERM + "📦 JSON INJETADO -> " + senha + RESET);
                 }
+                System.out.println(CIANO + "────────────────────────────────────" + RESET);
 
-                salvaLogTXT(ip, horario, servico, porta, usuario, senha, pais, cidade, org, dadosFinais);
-                conexoes.add(new String[]{horario, ip, pais, cidade, org, servico, String.valueOf(porta), usuario, senha, corpoStr.isEmpty() ? "(acesso visual)" : corpoStr});
+                salvaLogTXT(ip, horario, servico + " -> " + rotaDetectada, porta, usuario, senha, pais, cidade, org, dadosFinais);
+                conexoes.add(new String[]{horario, ip, pais, cidade, org, servico, rotaDetectada, usuario, senha, corpoStr.isEmpty() ? "(Verificação de Endpoint)" : corpoStr});
                 geraRelatorioHTML();
             }
 
         } catch (Exception e) {
-            // Erros tratados silenciosamente para não poluir o terminal
+            // Erros tratados silenciosamente para manter o terminal limpo
         }
     }
 
@@ -198,7 +223,7 @@ public class Honeypot {
                   td   { padding:8px 10px; border-bottom:1px solid #222; font-size:13px; }
                   tr:hover { background:#1a1a1a; }
                   .ssh   { color:#ff6b6b; }
-                  .http  { color:#74b9ff; }
+                  .api   { color:#74b9ff; }
                   .ftp   { color:#fdcb6e; }
                   .mysql { color:#a29bfe; }
                   .cred  { color:#ff4444; font-weight:bold; }
@@ -209,25 +234,27 @@ public class Honeypot {
                 <h1>🛡 Honeypot Shutdown — Relatório de Ataques</h1>
                 """);
 
-            pw.println("<p class='total'>Total de conexões: <b>" + conexoes.size() + "</b></p>");
+            pw.println("<p class='total'>Total de conexões interceptadas: <b>" + conexoes.size() + "</b></p>");
             pw.println("<p>Atualizado: " + LocalDateTime.now().format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm:ss")) + "</p>");
             pw.println("""
                 <table>
                 <tr>
                   <th>Horário</th><th>IP</th><th>País</th><th>Cidade</th>
-                  <th>Org</th><th>Serviço</th><th>Login</th><th>Dados</th>
+                  <th>Org</th><th>Serviço/Método</th><th>Rota/Porta</th><th>Identificação</th><th>Dados Capturados</th>
                 </tr>
                 """);
 
             synchronized (conexoes) {
                 for (String[] c : conexoes) {
-                    String cls = switch (c[5].toLowerCase()) {
-                        case "ssh"   -> "ssh";
-                        case "ftp"   -> "ftp";
-                        case "mysql" -> "mysql";
-                        default      -> "http";
-                    };
-                    String login = c[7].isEmpty() ? "-" : "<span class='cred'>" + c[7] + " / " + c[8] + "</span>";
+                    String cls = "api";
+                    if (c[5].toLowerCase().contains("ssh")) cls = "ssh";
+                    else if (c[5].toLowerCase().contains("ftp")) cls = "ftp";
+                    else if (c[5].toLowerCase().contains("mysql")) cls = "mysql";
+
+                    String login = c[7].isEmpty() ? "-" : "<span class='cred'>" + c[7] + "</span>";
+                    if (!c[8].isEmpty() && !c[7].equals("[JSON Payload]")) {
+                        login += " / <span class='cred'>" + c[8] + "</span>";
+                    }
 
                     pw.println("<tr>" +
                         "<td>" + c[0] + "</td>" +
@@ -235,9 +262,10 @@ public class Honeypot {
                         "<td>" + c[2] + "</td>" +
                         "<td>" + c[3] + "</td>" +
                         "<td>" + c[4] + "</td>" +
-                        "<td class='" + cls + "'>" + c[5] + ":" + c[6] + "</td>" +
+                        "<td class='" + cls + "'>" + c[5] + "</td>" +
+                        "<td>" + c[6] + "</td>" +
                         "<td>" + login + "</td>" +
-                        "<td><small>" + c[9].replace("\n", "<br>") + "</small></td>" +
+                        "<td><small>" + c[9].replace("\n", "<br>").replace(" ", "&nbsp;") + "</small></td>" +
                         "</tr>");
                 }
             }
@@ -256,12 +284,12 @@ public class Honeypot {
         try (BufferedWriter bw = new BufferedWriter(new FileWriter(LOG_TXT, true))) {
             bw.write("=== CONEXÃO ==="); bw.newLine();
             bw.write("Horário : " + horario); bw.newLine();
-            bw.write("Serviço : " + servico + " (" + porta + ")"); bw.newLine();
+            bw.write("Serviço : " + servico + " (Porta: " + porta + ")"); bw.newLine();
             bw.write("IP      : " + ip); bw.newLine();
             bw.write("Local   : " + cidade + " / " + pais); bw.newLine();
             bw.write("Org     : " + org); bw.newLine();
             if (!usuario.isEmpty())
-                bw.write("LOGIN   : " + usuario + " / " + senha + "\n");
+                bw.write("IDENTIF.: " + usuario + (senha.isEmpty() ? "" : " / " + senha) + "\n");
             bw.write("Dados   : " + (dados.isBlank() ? "(nenhum)" : dados.trim()));
             bw.newLine(); bw.newLine();
         } catch (IOException e) {
@@ -289,8 +317,29 @@ public class Honeypot {
         return new String[]{usuario, senha};
     }
 
-    static String bannerFalso(int porta) {
+    static String bannerFalso(int porta, String rota) {
         if (porta == 8080) {
+            // Se tentar forçar rotas de API conhecidas
+            if (rota.startsWith("/api/v1/")) {
+                String jsonResposta = switch (rota) {
+                    case "/api/v1/auth/login" -> "{\"status\":\"error\",\"message\":\"Bad credentials\",\"attempts_remaining\":2}";
+                    case "/api/v1/admin/dashboard" -> "{\"error\":\"Unauthorized\",\"code\":401,\"hint\":\"Requires bearer token verification\"}";
+                    case "/api/v1/users/export" -> "{\"success\":false,\"error\":\"Rate limit exceeded\",\"retry_after_ms\":3600000}";
+                    default -> "{\"message\":\"Resource not found\",\"status\":404}";
+                };
+
+                int statusCode = rota.equals("/api/v1/auth/login") ? 400 : (rota.contains("admin") || rota.contains("users") ? 401 : 404);
+                String statusTxt = statusCode == 400 ? "Bad Request" : (statusCode == 401 ? "Unauthorized" : "Not Found");
+
+                return "HTTP/1.1 " + statusCode + " " + statusTxt + "\r\n" +
+                       "Content-Type: application/json; charset=UTF-8\r\n" +
+                       "Content-Length: " + jsonResposta.getBytes().length + "\r\n" +
+                       "Server: API-Gateway/2.4.1\r\n" +
+                       "Connection: close\r\n\r\n" + 
+                       jsonResposta;
+            }
+
+            // Tela de login visual escura para a raiz da porta 8080
             String html = """
                 <!DOCTYPE html>
                 <html lang="en">
@@ -310,7 +359,7 @@ public class Honeypot {
                 </head>
                 <body>
                     <div class="login-box">
-                        <h2>Painel Administrativo</h2>
+                        <h2>Autenticação do Sistema</h2>
                         <form action="/" method="POST">
                             <div class="input-group">
                                 <label>Login</label>
